@@ -1,0 +1,183 @@
+Description: Listen to SQS Queue and write message to s3
+Parameters:
+  QueueName:
+    Default: "SampleQueue"
+    Description: "Eneter queue name "
+    Type: "String"  
+  TopicName:
+    Default: "SampleTopic"
+    Description: "Eneter topic name "
+    Type: "String"      
+  BucketName:
+    Default: "smplequeuebucket"
+    Description: "Eneter bucket name where queue messages will get stored"
+    Type: "String"      
+  Memory:
+    Description: Memory to allocate to Lambda function
+    Type: Number
+    Default:  512
+    MinValue: 512
+    MaxValue: 3008
+  S3DeploymentBucket:
+    Description: Enter the Amazon S3 bucket name that contains the AWS Lambda deployment package
+    Type: String
+    Default: "lambda-artifacts-june"
+  S3DeploymentKeyMessageReader:
+    Description: Enter the Amazon S3 key name for your AWS Lambda deployment package
+    Type: String
+    Default:  "SQSMessageReader.zip"
+
+Resources:
+# Create sample queue
+  MyQueue: 
+    Type: AWS::SQS::Queue
+    Properties: 
+      QueueName: !Ref QueueName
+      DelaySeconds: 0
+      VisibilityTimeout: 1200      
+      Tags: 
+        - Key: "createdBy"
+          Value: "Sushama"  
+# SampleQueue policy to send/receive messages 
+  SampleSQSPolicy: 
+    Type: AWS::SQS::QueuePolicy
+    Properties: 
+      Queues: 
+        -  !Ref MyQueue    
+      PolicyDocument: 
+        Statement: 
+          - 
+            Action: 
+              - "SQS:SendMessage" 
+              - "SQS:ReceiveMessage"
+            Effect: "Allow"
+            Resource: !GetAtt MyQueue.Arn
+            Principal:  
+              AWS: 
+                - "*" 
+# Create sample topic
+  SnsTopic:
+    Type: AWS::SNS::Topic  
+    Properties: 
+      Tags: 
+        - Key: "createdBy"
+          Value: "Sushama"
+      TopicName: !Ref TopicName      
+# Add sns subscription to the samplequeue and it has filter based policy. If message attribute has action: create key then it will forward message to queue
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt MyQueue.Arn
+      TopicArn: !Ref SnsTopic
+      FilterPolicy: 
+        action:
+          - create
+
+# Deploy lambda function from s3 bucket, it has the logic to get the messages from samplequeue and write them back to s3 bucket
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "SqsMessageReader_3"
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      Role:  !GetAtt LambdaRole.Arn
+      MemorySize: !Ref Memory
+      Timeout: 600
+      Code:
+        S3Bucket: !Ref S3DeploymentBucket
+        S3Key: !Ref S3DeploymentKeyMessageReader
+      Environment:
+        Variables:
+          s3bucketName: !Ref BucketName
+# Lambda execution permissions
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: "Lambda_Permissions"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:*Object
+                  - s3-object-lambda:*
+                Resource: "*"                   
+              - Effect: Allow
+                Action:
+                  - sns:List*
+                  - sns:GetTopicAttributes
+                  - sns:Subscribe
+                Resource: "*"                
+              - Effect: Allow
+                Action:
+                  - cloudwatch:*
+                Resource:  "*"    
+              - Effect: Allow
+                Action:
+                  - lambda:*
+                Resource:  "*"         
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource:  "*"      
+              - Effect: Allow
+                Action:
+                  - events:*
+                Resource:  "*"       
+                
+          
+  LambdaFunctionEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      Enabled: true
+      EventSourceArn: !GetAtt MyQueue.Arn
+      FunctionName: !GetAtt LambdaFunction.Arn                            
+       
+# s3 bucket where the messages will get stored. Applied versioning anf lifecycle policy to this bucket
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref BucketName
+  # Enable versioning
+      VersioningConfiguration:
+        Status: Enabled  
+  # Life cycle configuration for S3 bucket to expire after 90 days        
+      LifecycleConfiguration:
+          Rules:
+            - Id: DeleteContentAfter1Day
+              Status: 'Enabled'
+              ExpirationInDays: 90
+  # Moving objects to a cheaper storage class  after 30 days       
+              Transitions:
+                - TransitionInDays: 30
+                  StorageClass: STANDARD_IA   
+
+Outputs:
+  QueueARN: 
+    Description: "ARN of new AmazonSQS Queue"
+    Value: 
+      Fn::GetAtt: 
+        - "MyQueue"
+        - "Arn"
+  SnsTopicArn:
+    Description: "ARN of new AmazonSQS Queue"
+    Value: !Ref SnsTopic                             
